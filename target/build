@@ -1,0 +1,64 @@
+{
+  "last_build_time": 1774407772797,
+  "last_update_time": 1774407772797,
+  "last_bal_toml_update_time": 1774407479678,
+  "distribution_version": "2201.13.1",
+  "last_modified_time": {
+    "openapi_spec_finder": 1774407755311
+  },
+  "last_build_options": {
+    "compilationOptions": {
+      "observabilityIncluded": true,
+      "dumpBir": false,
+      "cloud": "",
+      "dumpGraph": false,
+      "dumpRawGraphs": false
+    }
+  },
+  "src_meta_info": [
+    {
+      "file": "/Users/tharanij/Documents/GitHub/agent-bal/openapi_agent.bal",
+      "hash": "00503c81ad45e3abbdbfa993e58a7ef7041d354f427449b69db5cf918ea1b18b",
+      "size": 27538,
+      "lastModifiedTime": 1774407737172
+    },
+    {
+      "file": "/Users/tharanij/Documents/GitHub/agent-bal/batch_find_specs.bal",
+      "hash": "139f90cb40688fe6636702440c1b05605720bceaae16f19961fa635dac1c921e",
+      "size": 10481,
+      "lastModifiedTime": 1774407755311
+    },
+    {
+      "file": "/Users/tharanij/Documents/GitHub/agent-bal/Ballerina.toml",
+      "hash": "c90daac725ec834e45906db76da42040f7fff05c7336895b69f877975e163bdf",
+      "size": 546,
+      "lastModifiedTime": 1774407479678
+    }
+  ],
+  "target_exec_meta_info": {
+    "file": "/Users/tharanij/Documents/GitHub/agent-bal/target/backup/bin/openapi_spec_finder.jar",
+    "hash": "4a4b9928e5c86743138dfdbdb6cebfc266346d87b30c4944c7b12fc0577c4e80",
+    "size": 47178076,
+    "lastModifiedTime": 1774407774847
+  },
+  "settings_meta_info": {
+    "file": "/Users/tharanij/.ballerina/Settings.toml",
+    "hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "size": 0,
+    "lastModifiedTime": 1764818857132
+  },
+  "ballerina_toml_meta_info": {
+    "file": "/Users/tharanij/Documents/GitHub/agent-bal/Ballerina.toml",
+    "hash": "c90daac725ec834e45906db76da42040f7fff05c7336895b69f877975e163bdf",
+    "size": 546,
+    "lastModifiedTime": 1774407479678
+  },
+  "imports": [
+    "ballerina/os",
+    "ballerina/http",
+    "ballerina/io",
+    "ballerina/file",
+    "ballerina/time",
+    "ballerina/lang.regexp"
+  ]
+}

@@ -1,0 +1,38 @@
+[package]
+org = "yourorg"
+name = "openapi_spec_finder"
+version = "0.1.0"
+distribution = "2201.10.0"
+
+[build-options]
+observabilityIncluded = true
+
+[[dependency]]
+org = "ballerina"
+name = "http"
+version = "2.10.0"
+
+[[dependency]]
+org = "ballerina"
+name = "io"
+version = "1.6.0"
+
+[[dependency]]
+org = "ballerina"
+name = "file"
+version = "1.9.0"
+
+[[dependency]]
+org = "ballerina"
+name = "lang.regexp"
+version = "0.0.0"
+
+[[dependency]]
+org = "ballerina"
+name = "time"
+version = "2.3.0"
+
+[[dependency]]
+org = "ballerina"
+name = "os"
+version = "1.7.0"
