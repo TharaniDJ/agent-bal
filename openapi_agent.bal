@@ -237,11 +237,6 @@ function jsonValueAsString(map<json> dataMap, string key) returns string {
 // HTTP HELPERS
 // ─────────────────────────────────────────────────────────────────────────────
 
-http:Client httpClient = check new ("", {
-    followRedirects: { enabled: true, maxCount: 5 },
-    timeout: 20
-});
-
 function fetchRaw(string url) returns http:Response|error {
     http:Client cl = check new (url, {
         followRedirects: { enabled: true, maxCount: 5 },
