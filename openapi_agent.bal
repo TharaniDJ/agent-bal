@@ -524,7 +524,6 @@ public class OpenAPIAgent {
             }
         }
 
-        string _ = maxIterations.toString();
         string systemPrompt = BASE_SYSTEM_PROMPT + memoryHint;
 
         string userMsg = string `Find the LATEST OpenAPI spec URL starting from: ${startingUrl}\n`;
@@ -537,62 +536,177 @@ public class OpenAPIAgent {
         if lastKnownVersion is string {
             userMsg += string `The last known version was ${lastKnownVersion}. Check if a newer version exists — but always return the latest regardless.\n`;
         }
-        userMsg += "\nIMPORTANT: Fetch the starting docs page first and read ALL links carefully before going elsewhere. Fetch at most 4 pages total. Output SPEC_CANDIDATES: as soon as you have plausible URLs.";
+        userMsg += "\nIMPORTANT: Use the fetch_page tool to fetch the starting docs page first. Read ALL content carefully before going elsewhere. Fetch at most 4 pages total. Output SPEC_CANDIDATES: as soon as you have plausible URLs.";
 
-        json requestBody = {
-            "model": "claude-sonnet-4-20250514",
-            "max_tokens": 1500,
-            "system": systemPrompt,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": userMsg
-                }
-            ]
-        };
-
-        http:Response|error respOrErr = self.anthropicClient->post(
-            "/v1/messages",
-            requestBody,
+        // Tool definition — enables Claude to actually browse pages
+        json[] agentTools = [
             {
-                "x-api-key": self.apiKey,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json"
-            }
-        );
-
-        if respOrErr is error {
-            io:println(string `  [error] API call failed: ${respOrErr.message()}`);
-            return ();
-        }
-
-        json|error bodyOrErr = respOrErr.getJsonPayload();
-        if bodyOrErr is error {
-            io:println("  [error] Could not parse API response");
-            return ();
-        }
-
-        AgentOutput? parsedOutput = ();
-        if bodyOrErr is map<json> {
-            map<json> body = bodyOrErr;
-            json contentJson = body.hasKey("content") ? body["content"] : [];
-            if contentJson is json[] {
-                string fullText = "";
-                foreach json block in contentJson {
-                    if block is map<json> {
-                        string blockType = jsonValueAsString(block, "type");
-                        if blockType == "text" {
-                            fullText += jsonValueAsString(block, "text") + "\n";
+                "name": "fetch_page",
+                "description": "Fetch a web page or file URL and return its content. Use this to explore documentation pages, GitHub repositories, and raw spec files.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "url": {
+                            "type": "string",
+                            "description": "The URL to fetch"
                         }
+                    },
+                    "required": ["url"]
+                }
+            }
+        ];
+
+        // Conversation history — grows as tools are called
+        json[] messages = [
+            {
+                "role": "user",
+                "content": userMsg
+            }
+        ];
+
+        string fullText = "";
+        AgentOutput? parsedOutput = ();
+        int iteration = 0;
+
+        // ── Agentic loop ──
+        while iteration < maxIterations {
+            iteration += 1;
+            io:println(string `  [agent] Iteration ${iteration}/${maxIterations}`);
+
+            json requestBody = {
+                "model": "claude-sonnet-4-20250514",
+                "max_tokens": 4096,
+                "system": systemPrompt,
+                "tools": agentTools,
+                "messages": messages
+            };
+
+            http:Response|error respOrErr = self.anthropicClient->post(
+                "/v1/messages",
+                requestBody,
+                {
+                    "x-api-key": self.apiKey,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json"
+                }
+            );
+
+            if respOrErr is error {
+                io:println(string `  [error] API call failed: ${respOrErr.message()}`);
+                return ();
+            }
+
+            json|error bodyOrErr = respOrErr.getJsonPayload();
+            if bodyOrErr is error {
+                io:println("  [error] Could not parse API response");
+                return ();
+            }
+
+            if !(bodyOrErr is map<json>) {
+                io:println("  [error] Unexpected API response format");
+                return ();
+            }
+
+            map<json> body = bodyOrErr;
+            string stopReason = jsonValueAsString(body, "stop_reason");
+            json contentJson = body.hasKey("content") ? body["content"] : [];
+
+            if !(contentJson is json[]) {
+                io:println("  [error] No content array in response");
+                return ();
+            }
+
+            json[] contentBlocks = <json[]>contentJson;
+
+            // Accumulate any text output from this turn
+            foreach json block in contentBlocks {
+                if block is map<json> {
+                    string blockType = jsonValueAsString(block, "type");
+                    if blockType == "text" {
+                        fullText += jsonValueAsString(block, "text") + "\n";
                     }
                 }
-                if fullText.includes("NO_SPEC_FOUND") {
-                    io:println("  Agent reports no spec found.");
-                    updateMemoryEntry(startingUrl, { last_search_outcome: "not_found" });
-                    return ();
-                }
-                parsedOutput = self.parseAgentOutput(fullText);
             }
+
+            if fullText.includes("NO_SPEC_FOUND") {
+                io:println("  Agent reports no spec found.");
+                updateMemoryEntry(startingUrl, {last_search_outcome: "not_found"});
+                return ();
+            }
+
+            // If agent output the final answer, or naturally finished, stop looping
+            if fullText.includes("SPEC_CANDIDATES:") || stopReason == "end_turn" {
+                if fullText.includes("SPEC_CANDIDATES:") {
+                    parsedOutput = self.parseAgentOutput(fullText);
+                }
+                break;
+            }
+
+            // If stop reason is not tool_use, nothing more to do
+            if stopReason != "tool_use" {
+                io:println(string `  [agent] Stop reason: ${stopReason} — ending loop`);
+                break;
+            }
+
+            // ── Execute tool calls ──
+            // Append assistant's response (with tool_use blocks) to conversation
+            json assistantMessage = {
+                "role": "assistant",
+                "content": contentBlocks
+            };
+            messages.push(assistantMessage);
+
+            // Build tool_result blocks
+            json[] toolResults = [];
+            foreach json block in contentBlocks {
+                if block is map<json> {
+                    string blockType = jsonValueAsString(block, "type");
+                    if blockType == "tool_use" {
+                        string toolId = jsonValueAsString(block, "id");
+                        string toolName = jsonValueAsString(block, "name");
+
+                        string fetchUrl = "";
+                        json inputVal = block.hasKey("input") ? block["input"] : {};
+                        if inputVal is map<json> && inputVal.hasKey("url") {
+                            json urlVal = inputVal["url"];
+                            if urlVal is string {
+                                fetchUrl = urlVal;
+                            }
+                        }
+
+                        string resultContent;
+                        if toolName == "fetch_page" && fetchUrl != "" {
+                            io:println(string `  [tool] fetch_page(${fetchUrl})`);
+                            PageResult pr = fetchPage(fetchUrl);
+                            if pr.'error is string {
+                                resultContent = string `Error fetching URL: ${pr.'error ?: "unknown"}`;
+                            } else {
+                                resultContent = string `URL: ${pr.url}\nType: ${pr.'type}\nContent:\n${pr.content ?: "(empty)"}`;
+                            }
+                        } else {
+                            resultContent = string `Unknown tool '${toolName}' or missing URL parameter`;
+                        }
+
+                        toolResults.push({
+                            "type": "tool_result",
+                            "tool_use_id": toolId,
+                            "content": resultContent
+                        });
+                    }
+                }
+            }
+
+            if toolResults.length() == 0 {
+                io:println("  [agent] No tool calls found despite tool_use stop reason — ending loop");
+                break;
+            }
+
+            // Append tool results as next user turn
+            json toolResultMessage = {
+                "role": "user",
+                "content": toolResults
+            };
+            messages.push(toolResultMessage);
         }
 
         // ── Validation ──
