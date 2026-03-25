@@ -10,11 +10,11 @@ import ballerina/lang.regexp;
 
 public type MemoryEntry record {
     string? spec_repo = ();
-    string[]? useful_pages = ();
+    string[]? found_urls = ();       // all found spec URLs, newest first
     string? last_found_version = ();
     string? search_notes = ();
     string? last_search_outcome = ();
-    string? last_found_url = ();
+    string? last_found_url = ();     // transient: used to pass updates into updateMemoryEntry
     string? last_searched = ();
 };
 
@@ -30,7 +30,6 @@ public type AgentOutput record {
     string[] candidates;
     string? search_notes;
     string? spec_repo;
-    string[] useful_pages;
 };
 
 public type SpecResult record {
@@ -120,12 +119,22 @@ function updateMemoryEntry(string docsUrl, MemoryEntry updates) {
     string key = memoryKey(docsUrl);
     MemoryEntry existing = memory.hasKey(key) ? memory.get(key) : {};
 
-    if updates.spec_repo is string    { existing.spec_repo = updates.spec_repo; }
-    if updates.useful_pages is string[] { existing.useful_pages = updates.useful_pages; }
+    if updates.spec_repo is string { existing.spec_repo = updates.spec_repo; }
     if updates.last_found_version is string { existing.last_found_version = updates.last_found_version; }
     if updates.search_notes is string { existing.search_notes = updates.search_notes; }
     if updates.last_search_outcome is string { existing.last_search_outcome = updates.last_search_outcome; }
-    if updates.last_found_url is string { existing.last_found_url = updates.last_found_url; }
+    // Prepend new URL to found_urls history (newest first, no duplicates)
+    if updates.last_found_url is string {
+        string newUrl = updates.last_found_url ?: "";
+        string[] existing_urls = existing.found_urls ?: [];
+        string[] newUrls = [newUrl];
+        foreach string u in existing_urls {
+            if u != newUrl {
+                newUrls.push(u);
+            }
+        }
+        existing.found_urls = newUrls;
+    }
 
     // Timestamp
     existing.last_searched = time:utcToString(time:utcNow());
@@ -136,17 +145,18 @@ function updateMemoryEntry(string docsUrl, MemoryEntry updates) {
 function buildMemoryHint(MemoryEntry entry) returns string {
     string[] parts = [];
 
+    string[]? foundUrls = entry.found_urls;
+    if foundUrls is string[] && foundUrls.length() > 0 {
+        parts.push(
+            string `Previously found spec at: ${foundUrls[0]}. ` +
+            "Start there or navigate to find the latest version."
+        );
+    }
     if entry.spec_repo is string {
         parts.push(
             string `Previously the spec was found in this repository: ${entry.spec_repo ?: ""}. ` +
-            "Start there and check for the latest release or version."
+            "Check there for the latest release or version."
         );
-    }
-    string[]? pages = entry.useful_pages;
-    if pages is string[] && pages.length() > 0 {
-        string pageLines = "\n".join(...from string p in pages.slice(0, pages.length() < 5 ? pages.length() : 5)
-                                        select string `  - ${p}`);
-        parts.push(string `These pages were useful last time:\n${pageLines}`);
     }
     if entry.last_found_version is string {
         parts.push(
@@ -292,17 +302,35 @@ function parseSpec(string text) returns map<json>|error {
     return error("Cannot parse as JSON or YAML");
 }
 
+function fetchForValidation(string url) returns http:Response|error {
+    http:Client cl = check new (url, {
+        followRedirects: { enabled: true, maxCount: 5 },
+        timeout: 30
+    });
+    // Range header fetches only first 8KB — enough to find openapi/swagger key and title.
+    // Server returns 206 (partial) or 200 (full) — both are fine.
+    http:Response resp = check cl->get("", {
+        "User-Agent": "OpenAPI-Spec-Finder/4.0",
+        "Range": "bytes=0-8191"
+    });
+    return resp;
+}
+
 function validateOpenApiSpec(string url) returns ValidationResult {
     ValidationResult result = {
         valid: false, version: (), title: (), format: (), 'error: ()
     };
 
-    http:Response|error respOrErr = fetchRaw(url);
+    http:Response|error respOrErr = fetchForValidation(url);
     if respOrErr is error {
         result.'error = "Could not fetch URL";
         return result;
     }
     http:Response resp = respOrErr;
+    if resp.statusCode != 200 && resp.statusCode != 206 {
+        result.'error = string `HTTP ${resp.statusCode}`;
+        return result;
+    }
     string|error textOrErr = resp.getTextPayload();
     if textOrErr is error {
         result.'error = "Could not read body";
@@ -421,22 +449,82 @@ public function fetchPage(string url) returns PageResult {
         return { url, 'type: "yaml", content: text.substring(0, text.length() < 40000 ? text.length() : 40000) };
     }
 
-    // HTML: extract text + relevant links (basic, no HTML parser in stdlib)
-    // Strip script/style blocks crudely
+    // HTML: extract text + relevant links
     string stripped = regexp:replaceAll(re `<script[^>]*>[\s\S]*?</script>`, text, "");
     stripped = regexp:replaceAll(re `<style[^>]*>[\s\S]*?</style>`, stripped, "");
     stripped = regexp:replaceAll(re `<[^>]+>`, stripped, " ");
     stripped = regexp:replaceAll(re `\s{2,}`, stripped, "\n");
     string pageText = stripped.substring(0, stripped.length() < 15000 ? stripped.length() : 15000);
 
-    return { url, 'type: "html", content: pageText, relevant_links: [] };
+    // Extract origin from base URL for resolving absolute-path hrefs
+    string origin = "";
+    if url.startsWith("https://") {
+        string rest = url.substring(8);
+        int? si = rest.indexOf("/");
+        origin = "https://" + (si is int ? rest.substring(0, si) : rest);
+    } else if url.startsWith("http://") {
+        string rest = url.substring(7);
+        int? si = rest.indexOf("/");
+        origin = "http://" + (si is int ? rest.substring(0, si) : rest);
+    }
+
+    string[] keywords = ["openapi", "swagger", "api-spec", "apispec", ".json", ".yaml", ".yml",
+                         "raw.githubusercontent", "api-reference", "rest-api-description",
+                         "releases", "tags", "tree/main", "tree/master", "/defs/", "/specs/", "openapi3"];
+    LinkEntry[] links = [];
+    map<string> seen = {};
+
+    // Absolute URLs: href="https://..."
+    regexp:Groups[] absMatches = re `href="(https?://[^"]+)"`.findAllGroups(text);
+    foreach regexp:Groups m in absMatches {
+        if m.length() > 1 {
+            regexp:Span? grp = m[1];
+            if grp is regexp:Span {
+                string href = text.substring(grp.startIndex, grp.endIndex);
+                string low = href.toLowerAscii();
+                boolean relevant = false;
+                foreach string kw in keywords {
+                    if low.includes(kw) { relevant = true; break; }
+                }
+                if relevant && !seen.hasKey(href) && links.length() < 40 {
+                    seen[href] = "1";
+                    links.push({ text: "", href });
+                }
+            }
+        }
+    }
+
+    // Absolute-path URLs: href="/path/..." — resolve against origin
+    if origin != "" {
+        regexp:Groups[] pathMatches = re `href="(/[^"#?][^"]*)"`.findAllGroups(text);
+        foreach regexp:Groups m in pathMatches {
+            if m.length() > 1 {
+                regexp:Span? grp = m[1];
+                if grp is regexp:Span {
+                    string path = text.substring(grp.startIndex, grp.endIndex);
+                    string href = origin + path;
+                    string low = href.toLowerAscii();
+                    boolean relevant = false;
+                    foreach string kw in keywords {
+                        if low.includes(kw) { relevant = true; break; }
+                    }
+                    if relevant && !seen.hasKey(href) && links.length() < 40 {
+                        seen[href] = "1";
+                        links.push({ text: "", href });
+                    }
+                }
+            }
+        }
+    }
+
+    return { url, 'type: "html", content: pageText, relevant_links: links };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SYSTEM PROMPT
 // ─────────────────────────────────────────────────────────────────────────────
 
-const BASE_SYSTEM_PROMPT = "You are an expert OpenAPI spec finder agent. Your ONLY job is to find the direct URL(s) to an API's LATEST official OpenAPI specification file (JSON or YAML).\n\n## Step-by-step strategy\n\n### Step 1 — Read the official docs page FIRST\nAlways start by fetching the starting documentation URL given to you.\nCarefully read ALL links on that page. API documentation pages often directly mention or link to their OpenAPI spec — look for:\n- Text like \"OpenAPI Specification\", \"Swagger\", \"Download spec\", \"API spec\", \"generated from our OpenAPI spec\"\n- Any link containing: openapi, swagger, .yaml, .yml, .json, spec, defs, raw.githubusercontent\n\n### Step 2 — Construct raw GitHub URLs immediately (do NOT keep fetching tree pages)\nIf you find a GitHub repository link or a file path reference:\n- DO NOT fetch github.com/owner/repo/tree/branch/path pages — these are HTML pages, not spec files\n- Instead, IMMEDIATELY construct the raw URL:\n  github.com/owner/repo/blob/branch/path/file.yaml → raw.githubusercontent.com/owner/repo/branch/path/file.yaml\n- Report the constructed raw URL as a candidate right away\n\n### Step 3 — Pick the highest version\nWhen multiple versioned files exist (e.g. swagger-v2.json and swagger-v2.1.json):\n- Always prefer the highest version number (v2.1 > v2, v3 > v2)\n- Look for the version number in the FILENAME itself\n- Also check GitHub Releases/Tags for the latest release tag\n\n### Step 4 — Prefer YAML over JSON at the same version\n\n## Efficiency rules\n- Fetch the starting docs page first — read it carefully before going anywhere else\n- Fetch at MOST 4 pages total\n- Never fetch github.com tree/blob pages to \"see\" files — construct raw URLs directly instead\n- Never fetch the same URL twice\n\n## Output format — output EXACTLY this block when done:\n\nSPEC_CANDIDATES:\n<url1>\n<url2>\nSEARCH_NOTES: <one sentence about where/how you found it>\nSPEC_REPO: <GitHub or source repo URL if applicable, else omit>\nUSEFUL_PAGES: <comma-separated pages that helped>\n\nIf no public spec exists after thorough search:\nNO_SPEC_FOUND\n";
+const BASE_SYSTEM_PROMPT = "You are an expert OpenAPI spec finder agent. Your ONLY job is to find the direct URL(s) to an API's LATEST official OpenAPI specification file (JSON or YAML).\n\n## Step-by-step strategy\n\n### Step 1 — Read the official docs page FIRST\nAlways start by fetching the starting documentation URL given to you.\nCarefully read ALL links on that page — the tool returns a RELEVANT LINKS section with pre-filtered links. API documentation pages often directly mention or link to their OpenAPI spec — look for:\n- Text like \"OpenAPI Specification\", \"Swagger\", \"Download spec\", \"API spec\", \"generated from our OpenAPI spec\"\n- Any link containing: openapi, swagger, .yaml, .yml, .json, spec, defs, raw.githubusercontent\n\n### Step 2 — Construct raw GitHub URLs immediately (do NOT keep fetching tree pages)\nIf you find a GitHub repository link or a file path reference:\n- DO NOT fetch github.com/owner/repo/tree/branch/path pages — these are HTML pages, not spec files\n- Instead, IMMEDIATELY construct the raw URL:\n  github.com/owner/repo/blob/branch/path/file.yaml → raw.githubusercontent.com/owner/repo/branch/path/file.yaml\n- Report the constructed raw URL as a candidate right away\n\n### Step 3 — Pick the highest version\nWhen multiple versioned files exist (e.g. swagger-v2.json and swagger-v2.1.json):\n- Always prefer the highest version number (v2.1 > v2, v3 > v2)\n- Look for the version number in the FILENAME itself\n- Also check GitHub Releases/Tags for the latest release tag\n\n### Step 4 — Prefer YAML over JSON at the same version\n\n## Efficiency rules\n- Fetch the starting docs page first — read it carefully before going anywhere else\n- Fetch at MOST 4 pages total\n- Never fetch github.com tree/blob pages to \"see\" files — construct raw URLs directly instead\n- Never fetch the same URL twice\n\n## Output format — output EXACTLY this block when done:\n\nSPEC_CANDIDATES:\n<url1>\n<url2>\nSEARCH_NOTES: <one sentence about where/how you found it>\nSPEC_REPO: <GitHub or source repo URL if applicable, else omit>\n\nIf no public spec exists after thorough search:\nNO_SPEC_FOUND\n";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ANTHROPIC CLIENT & AGENT
@@ -478,7 +566,7 @@ public class OpenAPIAgent {
     }
 
     function parseAgentOutput(string text) returns AgentOutput {
-        AgentOutput result = { candidates: [], search_notes: (), spec_repo: (), useful_pages: [] };
+        AgentOutput result = { candidates: [], search_notes: (), spec_repo: () };
         if !text.includes("SPEC_CANDIDATES:") {
             return result;
         }
@@ -496,11 +584,6 @@ public class OpenAPIAgent {
                 result.search_notes = line.substring("SEARCH_NOTES:".length()).trim();
             } else if line.startsWith("SPEC_REPO:") {
                 result.spec_repo = line.substring("SPEC_REPO:".length()).trim();
-            } else if line.startsWith("USEFUL_PAGES:") {
-                string raw = line.substring("USEFUL_PAGES:".length()).trim();
-                result.useful_pages = from string p in splitByDelimiter(raw, ",")
-                                      where p.trim() != ""
-                                      select p.trim();
             }
         }
         return result;
@@ -574,7 +657,7 @@ public class OpenAPIAgent {
             io:println(string `  [agent] Iteration ${iteration}/${maxIterations}`);
 
             json requestBody = {
-                "model": "claude-sonnet-4-20250514",
+                "model": "claude-sonnet-4-6",
                 "max_tokens": 4096,
                 "system": systemPrompt,
                 "tools": agentTools,
@@ -681,7 +764,16 @@ public class OpenAPIAgent {
                             if pr.'error is string {
                                 resultContent = string `Error fetching URL: ${pr.'error ?: "unknown"}`;
                             } else {
-                                resultContent = string `URL: ${pr.url}\nType: ${pr.'type}\nContent:\n${pr.content ?: "(empty)"}`;
+                                string linksSection = "";
+                                LinkEntry[]? links = pr.relevant_links;
+                                if links is LinkEntry[] && links.length() > 0 {
+                                    string[] linkLines = [];
+                                    foreach LinkEntry l in links {
+                                        linkLines.push(string `  - ${l.href}`);
+                                    }
+                                    linksSection = "\n\nRELEVANT LINKS:\n" + "\n".join(...linkLines);
+                                }
+                                resultContent = string `URL: ${pr.url}\nType: ${pr.'type}\nContent:\n${pr.content ?: "(empty)"}${linksSection}`;
                             }
                         } else {
                             resultContent = string `Unknown tool '${toolName}' or missing URL parameter`;
@@ -773,7 +865,6 @@ public class OpenAPIAgent {
             last_search_outcome: "found"
         };
         if po.spec_repo is string { memUpdate.spec_repo = po.spec_repo; }
-        if po.useful_pages.length() > 0 { memUpdate.useful_pages = po.useful_pages; }
         if po.search_notes is string { memUpdate.search_notes = po.search_notes; }
         updateMemoryEntry(startingUrl, memUpdate);
         io:println(string `  [memory] Updated for ${memoryKey(startingUrl)}`);
