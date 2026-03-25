@@ -1,15 +1,18 @@
 {
-  "last_build_time": 1774411297194,
-  "last_update_time": 1774411297194,
+  "last_build_time": 1774428340677,
+  "last_update_time": 1774428340677,
   "last_bal_toml_update_time": 1774407479678,
   "distribution_version": "2201.13.1",
   "last_modified_time": {
-    "openapi_spec_finder": 1774411275610
+    "openapi_spec_finder": 1774428229206
   },
   "last_build_options": {
+    "testReport": false,
+    "codeCoverage": false,
+    "skipTests": true,
     "compilationOptions": {
+      "experimental": false,
       "observabilityIncluded": true,
-      "dumpBir": false,
       "cloud": "",
       "dumpGraph": false,
       "dumpRawGraphs": false
@@ -24,9 +27,9 @@
     },
     {
       "file": "/Users/tharanij/Documents/GitHub/agent-bal/batch_find_specs.bal",
-      "hash": "139f90cb40688fe6636702440c1b05605720bceaae16f19961fa635dac1c921e",
-      "size": 10481,
-      "lastModifiedTime": 1774407803955
+      "hash": "c8db5fcba5877914d901e8bd73be9b95d704e4f4689a565c276bbc85ea9589f0",
+      "size": 10340,
+      "lastModifiedTime": 1774428229206
     },
     {
       "file": "/Users/tharanij/Documents/GitHub/agent-bal/Ballerina.toml",
@@ -37,9 +40,9 @@
   ],
   "target_exec_meta_info": {
     "file": "/Users/tharanij/Documents/GitHub/agent-bal/target/backup/bin/openapi_spec_finder.jar",
-    "hash": "a70803106ba4ef2b20d86266d68d39225ef882af319b11285f345f7204fcf41f",
-    "size": 47198106,
-    "lastModifiedTime": 1774411299256
+    "hash": "c68c2ba7d9315fc00aaf62bac06d9407ee2e6714ad5b07d6c986714e6be6e1d8",
+    "size": 47197048,
+    "lastModifiedTime": 1774428342685
   },
   "settings_meta_info": {
     "file": "/Users/tharanij/.ballerina/Settings.toml",
