@@ -84,11 +84,6 @@ final ApiEntry[] API_DOCS = [
         name: "Discord",
         docs_url: "https://discord.com/developers/docs/reference",
         check_frequency_days: 7
-    },
-    {
-        name: "Dayforce",
-        docs_url: "https://developers.dayforce.com/Build/Home.aspx",
-        check_frequency_days: 30
     }
 ];
 
